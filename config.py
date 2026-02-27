@@ -10,7 +10,7 @@ class E3PConfig:
     # --- Paths ---
     data_root: str = "./data/office31"
     output_dir: str = "./output"
-    source_model_path: str = "./output/source_model.pth"
+    source_model_path: str = ""  # Will be set dynamically
 
     # --- Dataset ---
     source_domain: str = "amazon"

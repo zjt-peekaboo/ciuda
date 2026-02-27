@@ -466,17 +466,25 @@ class TargetTrainer:
                     sim = torch.mm(feat_norm, proto_matrix.t()) / self.config.proto_temperature
 
                     # For each sample, find its prototype index
+                    # Only compute loss for samples whose class has a prototype
                     proto_targets = []
-                    for lbl in lbls:
+                    valid_mask = []
+                    for i, lbl in enumerate(lbls):
                         lbl_item = lbl.item()
                         if lbl_item in proto_class_ids:
                             proto_targets.append(proto_class_ids.index(lbl_item))
+                            valid_mask.append(True)
                         else:
-                            # Assign to nearest prototype
-                            proto_targets.append(sim[0].argmax().item())
+                            # Skip samples without prototype (avoid systematic errors)
+                            proto_targets.append(0)  # dummy value
+                            valid_mask.append(False)
 
                     proto_targets = torch.tensor(proto_targets, device=self.device, dtype=torch.long)
-                    loss_proto = F.cross_entropy(sim, proto_targets)
+                    valid_mask = torch.tensor(valid_mask, device=self.device)
+
+                    # Only compute loss on valid samples
+                    if valid_mask.sum() > 0:
+                        loss_proto = F.cross_entropy(sim[valid_mask], proto_targets[valid_mask])
 
                 # --- L_dist: self-distillation from previous model ---
                 loss_dist = torch.tensor(0.0, device=self.device)

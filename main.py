@@ -63,6 +63,21 @@ def parse_args():
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--skip_source", action="store_true",
                         help="Skip source training, load existing model")
+    # Additional hyperparameters for tuning
+    parser.add_argument("--proto_temp", type=float, default=None,
+                        help="Prototype temperature (default: 0.07)")
+    parser.add_argument("--proto_ema", type=float, default=None,
+                        help="Prototype EMA beta (default: 0.9)")
+    parser.add_argument("--reliability_threshold", type=float, default=None,
+                        help="Reliability threshold for prototype update (default: 0.3)")
+    parser.add_argument("--class_detect_alpha", type=int, default=None,
+                        help="Class discovery voting threshold (default: 3)")
+    parser.add_argument("--lambda_pl", type=float, default=None,
+                        help="Pseudo-label loss weight (default: 1.0)")
+    parser.add_argument("--lambda_proto", type=float, default=None,
+                        help="Prototype loss weight (default: 0.1)")
+    parser.add_argument("--lambda_dist", type=float, default=None,
+                        help="Distillation loss weight (default: 1.0)")
     return parser.parse_args()
 
 
@@ -84,6 +99,13 @@ def main():
         source_batch_size=args.source_batch_size if args.source_batch_size else args.batch_size,
         target_batch_size=args.target_batch_size if args.target_batch_size else args.batch_size,
         device=args.device if torch.cuda.is_available() else "cpu",
+        proto_temperature=args.proto_temp if args.proto_temp is not None else 0.07,
+        proto_ema_beta=args.proto_ema if args.proto_ema is not None else 0.9,
+        reliability_threshold_gamma=args.reliability_threshold if args.reliability_threshold is not None else 0.3,
+        class_detect_alpha=args.class_detect_alpha if args.class_detect_alpha is not None else 3,
+        lambda_pl=args.lambda_pl if args.lambda_pl is not None else 1.0,
+        lambda_proto=args.lambda_proto if args.lambda_proto is not None else 0.1,
+        lambda_dist=args.lambda_dist if args.lambda_dist is not None else 1.0,
     )
     config.source_model_path = os.path.join(
         config.output_dir, f"source_{config.source_domain}.pth"
