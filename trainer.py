@@ -411,21 +411,42 @@ class TargetTrainer:
         """
         Discover which classes are present in current task data.
         Uses weighted voting with reliability scores.
+
+        For Task 1 (cold start): uses Top-K strategy to handle unreliable predictions.
+        For later tasks: uses threshold-based strategy with buffer priors.
         """
         vote = torch.zeros(self.config.num_classes)
+        count = torch.zeros(self.config.num_classes)
         for c in range(self.config.num_classes):
             mask = pseudo_labels == c
             if mask.sum() > 0:
                 vote[c] = (reliability[mask]).sum().item()
+                count[c] = mask.sum().item()
 
-        threshold = self.config.class_detect_alpha
-        discovered = [c for c in range(self.config.num_classes) if vote[c] >= threshold]
+        # Task 1: cold start - use Top-K strategy
+        if task_id == 0:
+            k = self.config.task_sizes[0]  # expected number of classes in Task 1
+            # Combine reliability vote and count for better selection
+            # Use a hybrid score: reliability + 0.5 * count
+            score = vote + 0.5 * count
+            # Get top-k classes
+            topk_vals, topk_indices = torch.topk(score, k)
+            discovered = topk_indices.tolist()
+            logger.info(
+                f"Task 1 (cold start) Top-{k} discovery: "
+                f"selected {discovered}, scores: {score[discovered].tolist():.2f}"
+            )
+        else:
+            # Later tasks: threshold-based with buffer priors
+            threshold = self.config.class_detect_alpha
+            discovered = [c for c in range(self.config.num_classes) if vote[c] >= threshold]
 
-        # Also include classes from previous tasks (already in buffer)
-        for c in self.buffer.seen_classes:
-            if c not in discovered:
-                discovered.append(c)
-        discovered.sort()
+            # Also include classes from previous tasks (already in buffer)
+            for c in self.buffer.seen_classes:
+                if c not in discovered:
+                    discovered.append(c)
+            discovered.sort()
+
         return discovered
 
     def _update_buffer(
