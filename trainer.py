@@ -290,11 +290,18 @@ class TargetTrainer:
 
             # --- Phase 2: Update prototypes ---
             logger.info("Phase 2: Prototype update")
-            self.prototype_lib.update(
-                all_features.to(self.device),
-                all_pseudo_labels.to(self.device),
-                all_reliabilities.to(self.device),
-            )
+            # Only update prototypes for discovered classes
+            # Filter features and labels to only include discovered classes
+            discovered_mask = torch.zeros(len(all_pseudo_labels), dtype=torch.bool)
+            for c in discovered:
+                discovered_mask |= (all_pseudo_labels == c)
+
+            if discovered_mask.sum() > 0:
+                self.prototype_lib.update(
+                    all_features[discovered_mask].to(self.device),
+                    all_pseudo_labels[discovered_mask].to(self.device),
+                    all_reliabilities[discovered_mask].to(self.device),
+                )
             self.prototype_lib.log_status()
 
             # --- Phase 3: Correct pseudo-labels via prototype propagation ---
@@ -302,13 +309,22 @@ class TargetTrainer:
             model_probs = F.softmax(
                 self._get_all_logits(target_model, mv_dataset), dim=1
             )
-            corrected_labels, corrected_probs = self.prototype_lib.correct_pseudo_labels(
-                all_features.to(self.device),
-                model_probs.to(self.device),
-                all_reliabilities.to(self.device),
-                self.config.num_classes,
-            )
-            corrected_labels = corrected_labels.cpu()
+
+            # For Task 1 (cold start), use model predictions directly
+            # to avoid bias from source-domain prototypes
+            if task_id == 0:
+                logger.info("Task 1 (cold start): using model predictions without prototype correction")
+                corrected_labels = model_probs.argmax(dim=1).cpu()
+                corrected_probs = model_probs.cpu()
+            else:
+                corrected_labels, corrected_probs = self.prototype_lib.correct_pseudo_labels(
+                    all_features.to(self.device),
+                    model_probs.to(self.device),
+                    all_reliabilities.to(self.device),
+                    self.config.num_classes,
+                )
+                corrected_labels = corrected_labels.cpu()
+                corrected_probs = corrected_probs.cpu()
 
             # --- Phase 4: Update buffer ---
             logger.info("Phase 4: Buffer update")
@@ -412,33 +428,68 @@ class TargetTrainer:
         Discover which classes are present in current task data.
         Uses weighted voting with reliability scores.
 
-        For Task 1 (cold start): uses Top-K strategy to handle unreliable predictions.
-        For later tasks: uses threshold-based strategy with buffer priors.
+        For Task 1 (cold start): use top-K strategy to ensure correct number of classes.
+        For later tasks: use threshold + buffer classes.
         """
         vote = torch.zeros(self.config.num_classes)
-        count = torch.zeros(self.config.num_classes)
         for c in range(self.config.num_classes):
             mask = pseudo_labels == c
             if mask.sum() > 0:
                 vote[c] = (reliability[mask]).sum().item()
-                count[c] = mask.sum().item()
 
-        # Task 1: cold start - use Top-K strategy
+        # Log top discovery candidates for debugging
+        top_k = min(self.config.task_sizes[task_id] + 5, self.config.num_classes)
+        top_vals, top_idxs = torch.topk(vote, k=top_k)
+        logger.info(
+            f"Task {task_id+1} ({'cold start' if task_id == 0 else 'warm'}) "
+            f"Top-{len(top_idxs)} discovery: selected {top_idxs.tolist()}, "
+            f"scores: {top_vals.tolist()}"
+        )
+
+        discovered = []
+
         if task_id == 0:
-            k = self.config.task_sizes[0]  # expected number of classes in Task 1
-            # Combine reliability vote and count for better selection
-            # Use a hybrid score: reliability + 0.5 * count
-            score = vote + 0.5 * count
-            # Get top-k classes
-            topk_vals, topk_indices = torch.topk(score, k)
-            discovered = topk_indices.tolist()
-            score_str = ', '.join([f'{s:.2f}' for s in score[discovered].tolist()])
-            logger.info(
-                f"Task 1 (cold start) Top-{k} discovery: "
-                f"selected {discovered}, scores: [{score_str}]"
-            )
+            # Task 1 (cold start): use top-K strategy
+            k = self.config.task_sizes[task_id]
+            top_k_vals, top_k_idxs = torch.topk(vote, k=k)
+            discovered = top_k_idxs.tolist()
+
+            # Additional filter: remove classes with very low reliability (< 1.0)
+            # and replace with next best candidates
+            filtered_discovered = []
+            backup_candidates = []
+            for i, c in enumerate(top_k_idxs.tolist()):
+                if vote[c] >= 1.0:
+                    filtered_discovered.append(c)
+                else:
+                    # Keep as backup, but try to find better candidates
+                    backup_candidates.append(c)
+
+            # If we filtered out some classes, try to fill with remaining high-scoring classes
+            if len(filtered_discovered) < k:
+                remaining_mask = torch.ones(self.config.num_classes, dtype=torch.bool)
+                for c in filtered_discovered:
+                    remaining_mask[c] = False
+                for c in backup_candidates:
+                    remaining_mask[c] = False
+
+                remaining_vote = vote.clone()
+                remaining_vote[~remaining_mask] = -1
+
+                n_needed = k - len(filtered_discovered)
+                if remaining_vote.max() >= 1.0:
+                    fill_vals, fill_idxs = torch.topk(remaining_vote, k=n_needed)
+                    for c in fill_idxs.tolist():
+                        if vote[c] >= 1.0:
+                            filtered_discovered.append(c)
+
+                # If still not enough, fall back to original top-k
+                if len(filtered_discovered) < k:
+                    filtered_discovered = top_k_idxs.tolist()
+
+            discovered = filtered_discovered
         else:
-            # Later tasks: threshold-based with buffer priors
+            # Later tasks: use threshold + buffer classes
             threshold = self.config.class_detect_alpha
             discovered = [c for c in range(self.config.num_classes) if vote[c] >= threshold]
 
@@ -446,8 +497,8 @@ class TargetTrainer:
             for c in self.buffer.seen_classes:
                 if c not in discovered:
                     discovered.append(c)
-            discovered.sort()
 
+        discovered.sort()
         return discovered
 
     def _update_buffer(
