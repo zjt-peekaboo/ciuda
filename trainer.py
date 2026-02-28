@@ -432,9 +432,10 @@ class TargetTrainer:
             # Get top-k classes
             topk_vals, topk_indices = torch.topk(score, k)
             discovered = topk_indices.tolist()
+            score_str = ', '.join([f'{s:.2f}' for s in score[discovered].tolist()])
             logger.info(
                 f"Task 1 (cold start) Top-{k} discovery: "
-                f"selected {discovered}, scores: {score[discovered].tolist():.2f}"
+                f"selected {discovered}, scores: [{score_str}]"
             )
         else:
             # Later tasks: threshold-based with buffer priors
