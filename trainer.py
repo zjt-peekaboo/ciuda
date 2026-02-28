@@ -23,15 +23,68 @@ from dataset import (
 
 
 class SourceTrainer:
-    """Train source model on labeled source domain (standard supervised)."""
+    """Train source model on labeled source domain with CE loss + optional triplet loss."""
 
     def __init__(self, config: E3PConfig):
         self.config = config
         self.device = torch.device(config.device)
+        self.use_triplet = config.use_triplet
+        self.triplet_margin = config.triplet_margin
+        self.lambda_triplet = config.lambda_triplet
+
+    @staticmethod
+    def hardest_negative_triplet_loss(features, labels, margin=0.5):
+        """
+        Hardest negative triplet loss with batch-all strategy.
+        Args:
+            features: (B, D) normalized features
+            labels: (B,) class labels
+            margin: margin for triplet loss
+        Returns:
+            triplet loss value
+        """
+        # Normalize features
+        features = F.normalize(features, dim=1)
+
+        B = features.size(0)
+        # Compute pairwise distance matrix
+        # dist[i, j] = ||feat[i] - feat[j]||_2
+        dist_matrix = torch.cdist(features, features, p=2)
+
+        # Create masks for positive and negative pairs
+        labels_eq = labels.unsqueeze(1) == labels.unsqueeze(0)  # (B, B)
+        labels_neq = labels.unsqueeze(1) != labels.unsqueeze(0)
+
+        # Exclude self from positive pairs
+        mask_diag = torch.eye(B, device=features.device, dtype=torch.bool)
+        labels_eq = labels_eq & ~mask_diag
+
+        # For each anchor, find the hardest positive (furthest positive)
+        dist_pos = dist_matrix.masked_fill(~labels_eq, -float('inf'))
+        hardest_pos = dist_pos.max(dim=1)[0]  # (B,)
+        pos_exists = labels_eq.sum(dim=1) > 0  # anchors with at least one positive
+
+        # For each anchor, find the hardest negative (closest negative)
+        dist_neg = dist_matrix.masked_fill(~labels_neq, float('inf'))
+        hardest_neg = dist_neg.min(dim=1)[0]  # (B,)
+        neg_exists = labels_neq.sum(dim=1) > 0  # anchors with at least one negative
+
+        # Triplet loss: max(0, d_pos - d_neg + margin)
+        triplet_loss = F.relu(hardest_pos - hardest_neg + margin)
+
+        # Only consider anchors that have both positive and negative pairs
+        valid_mask = pos_exists & neg_exists
+        if valid_mask.sum() == 0:
+            return torch.tensor(0.0, device=features.device)
+
+        triplet_loss = triplet_loss[valid_mask].mean()
+        return triplet_loss
 
     def train(self, model: E3PModel, train_dataset: Office31Dataset) -> E3PModel:
         logger.info("=" * 60)
         logger.info("Source domain training started")
+        if self.use_triplet:
+            logger.info(f"Using Triplet Loss (margin={self.triplet_margin}, lambda={self.lambda_triplet})")
         logger.info("=" * 60)
 
         model.unfreeze_all()
@@ -61,30 +114,67 @@ class SourceTrainer:
         for epoch in range(self.config.source_epochs):
             model.train()
             total_loss = 0.0
+            total_ce = 0.0
+            total_triplet = 0.0
             correct = 0
             total = 0
 
             pbar = tqdm(loader, desc=f"Source Epoch {epoch+1}/{self.config.source_epochs}")
             for images, labels, _ in pbar:
                 images, labels = images.to(self.device), labels.to(self.device)
-                logits, _ = model(images, use_adapter=False)
-                loss = criterion(logits, labels)
+
+                # Forward pass
+                logits, features = model(images, use_adapter=False)
+
+                # Cross-entropy loss
+                loss_ce = criterion(logits, labels)
+
+                # Triplet loss (optional)
+                loss_triplet = torch.tensor(0.0, device=self.device)
+                if self.use_triplet:
+                    loss_triplet = self.hardest_negative_triplet_loss(
+                        features, labels, self.triplet_margin
+                    )
+
+                # Combined loss
+                loss = loss_ce + self.lambda_triplet * loss_triplet
 
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
 
                 total_loss += loss.item() * images.size(0)
+                total_ce += loss_ce.item() * images.size(0)
+                total_triplet += loss_triplet.item() * images.size(0)
                 correct += (logits.argmax(1) == labels).sum().item()
                 total += images.size(0)
-                pbar.set_postfix(loss=f"{loss.item():.4f}", acc=f"{100*correct/total:.1f}%")
+
+                if self.use_triplet:
+                    pbar.set_postfix(
+                        loss=f"{loss.item():.4f}",
+                        ce=f"{loss_ce.item():.4f}",
+                        tri=f"{loss_triplet.item():.4f}",
+                        acc=f"{100*correct/total:.1f}%"
+                    )
+                else:
+                    pbar.set_postfix(loss=f"{loss.item():.4f}", acc=f"{100*correct/total:.1f}%")
 
             scheduler.step()
             epoch_acc = 100 * correct / total
             epoch_loss = total_loss / total
-            logger.info(
-                f"Source Epoch {epoch+1}: loss={epoch_loss:.4f}, acc={epoch_acc:.1f}%"
-            )
+            epoch_ce = total_ce / total
+            epoch_triplet = total_triplet / total
+
+            if self.use_triplet:
+                logger.info(
+                    f"Source Epoch {epoch+1}: loss={epoch_loss:.4f} "
+                    f"(ce={epoch_ce:.4f}, triplet={epoch_triplet:.4f}), "
+                    f"acc={epoch_acc:.1f}%"
+                )
+            else:
+                logger.info(
+                    f"Source Epoch {epoch+1}: loss={epoch_loss:.4f}, acc={epoch_acc:.1f}%"
+                )
 
             if epoch_acc > best_acc:
                 best_acc = epoch_acc

@@ -32,6 +32,10 @@ class E3PConfig:
     source_epochs: int = 30
     source_lr: float = 0.001
     source_batch_size: int = 64
+    # Triplet loss
+    use_triplet: bool = True
+    triplet_margin: float = 0.5
+    lambda_triplet: float = 0.1
 
     # --- Target Adaptation ---
     target_epochs_per_task: int = 20

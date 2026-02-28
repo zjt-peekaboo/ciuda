@@ -78,6 +78,15 @@ def parse_args():
                         help="Prototype loss weight (default: 0.1)")
     parser.add_argument("--lambda_dist", type=float, default=None,
                         help="Distillation loss weight (default: 1.0)")
+    # Triplet loss for source training
+    parser.add_argument("--use_triplet", action="store_true",
+                        help="Use triplet loss in source training")
+    parser.add_argument("--no_triplet", action="store_true",
+                        help="Disable triplet loss in source training")
+    parser.add_argument("--triplet_margin", type=float, default=None,
+                        help="Triplet loss margin (default: 0.5)")
+    parser.add_argument("--lambda_triplet", type=float, default=None,
+                        help="Triplet loss weight (default: 0.1)")
     return parser.parse_args()
 
 
@@ -106,6 +115,10 @@ def main():
         lambda_pl=args.lambda_pl if args.lambda_pl is not None else 1.0,
         lambda_proto=args.lambda_proto if args.lambda_proto is not None else 0.1,
         lambda_dist=args.lambda_dist if args.lambda_dist is not None else 1.0,
+        # Triplet loss settings
+        use_triplet=not args.no_triplet,  # default True, use --no_triplet to disable
+        triplet_margin=args.triplet_margin if args.triplet_margin is not None else 0.5,
+        lambda_triplet=args.lambda_triplet if args.lambda_triplet is not None else 0.1,
     )
     config.source_model_path = os.path.join(
         config.output_dir, f"source_{config.source_domain}.pth"
